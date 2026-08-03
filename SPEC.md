@@ -1,14 +1,16 @@
-# Especificación Técnica: MCP Neubox para OpenCode
+# Especificación Técnica: MCP Neubox Python para N8N
 
 ---
 
 ## 1. Contexto y Objetivo
 
-Desarrollar un servidor **MCP (Model Context Protocol)** escrito en **JavaScript (Node.js)** que integre la API REST de NEUBOX, permitiendo que OpenCode —y cualquier cliente MCP compatible— administre dominios directamente desde el asistente de IA, sin necesidad de interactuar manualmente con la plataforma web de NEUBOX.
+Servidor **MCP (Model Context Protocol)** escrito en **Python** que integra la API REST de NEUBOX (`https://api.neubox.com`). Diseñado para ser consumido por un **Agente de IA en N8N** mediante el transporte `streamable-http` del MCP Python SDK.
+
+Desplegado en un contenedor Docker, expuesto públicamente vía Apache con SSL (Certbot), con tres capas de seguridad: API Key, IP Whitelist y Rate Limiting.
 
 **URL base de la API:** `https://api.neubox.com`
 
-**Restricción de acceso:** La API de NEUBOX está disponible únicamente para Resellers, Domainers, Distribuidores o clientes con más de 50 dominios registrados.
+**Referencia:** https://neubox.com/developers
 
 ---
 
@@ -16,419 +18,339 @@ Desarrollar un servidor **MCP (Model Context Protocol)** escrito en **JavaScript
 
 | Actor | Descripción |
 |---|---|
-| Usuario de OpenCode | Persona que interactúa con el LLM para administrar dominios vía lenguaje natural |
-| Servidor MCP Neubox | Proceso Node.js que traduce las intenciones del LLM en llamadas a la API de NEUBOX |
-| API de NEUBOX | Sistema externo que ejecuta las operaciones reales sobre los dominios |
+| Usuario final | Persona que interactúa con el agente de IA en N8N |
+| Agente de IA (N8N) | Recibe el prompt, interpreta intención, llama tools del MCP, responde en español |
+| Servidor MCP Python | Proceso en Docker que valida seguridad y traduce tools en llamadas a NEUBOX |
+| Apache + Certbot | Reverse proxy con SSL que termina TLS y redirige al contenedor |
+| API NEUBOX | Sistema externo que ejecuta operaciones reales sobre dominios |
 
 ---
 
 ## 3. Requerimientos Funcionales
 
-| ID | Requerimiento |
-|---|---|
-| FR-001 | El servidor MCP debe exponer la tool `list_domains` para obtener el listado de dominios registrados en la cuenta NEUBOX. |
-| FR-002 | El servidor MCP debe exponer la tool `register_domain` para registrar uno o varios dominios nuevos con sus respectivos períodos de registro. |
-| FR-003 | El servidor MCP debe exponer la tool `renew_domain` para renovar uno o varios dominios existentes con sus respectivos períodos de renovación. |
-| FR-004 | El servidor MCP debe exponer la tool `search_domains` para buscar la disponibilidad de un dominio en uno o varios TLDs. |
-| FR-005 | Cada tool debe validar los parámetros de entrada antes de ejecutar la llamada HTTP, retornando un mensaje de error descriptivo si faltan campos requeridos o tienen tipos incorrectos. |
-| FR-006 | El email del usuario debe codificarse automáticamente en Base64 dentro del servidor antes de enviarse a la API, tanto en los headers como en el body cuando corresponda. |
-| FR-007 | Los errores retornados por la API de NEUBOX (crédito insuficiente, usuario inexistente, rate limit, etc.) deben retornarse al LLM como mensajes de texto legibles, sin interrumpir el proceso del servidor MCP. |
-| FR-008 | El servidor debe incluir el snippet de configuración exacto para registrarlo en OpenCode mediante `opencode.json`. |
+| ID | Requerimiento | Prioridad |
+|---|---|---|
+| FR-001 | Exponer tool `list_domains` que retorna dominios registrados en la cuenta NEUBOX | Alta |
+| FR-002 | Exponer tool `register_domain` para registrar dominios con períodos de registro | Alta |
+| FR-003 | Exponer tool `renew_domain` para renovar dominios con períodos de renovación | Alta |
+| FR-004 | Exponer tool `search_domains` para buscar disponibilidad en múltiples TLDs | Alta |
+| FR-005 | Validar parámetros de entrada con Pydantic antes de cada llamada HTTP | Alta |
+| FR-006 | Codificar email en Base64 automáticamente antes de enviarlo a la API | Alta |
+| FR-007 | Retornar errores de NEUBOX como texto legible al agente sin interrumpir el servidor | Alta |
+| FR-008 | Validar header `X-API-Key`; si falta o no coincide → HTTP 401 | Crítica |
+| FR-009 | Validar IP del cliente contra whitelist; si no autorizada → HTTP 403 | Crítica |
+| FR-010 | Aplicar rate limiting por IP configurable vía env vars | Alta |
+| FR-011 | Exponer `GET /health` sin auth ni IP whitelist para health checks | Media |
+| FR-012 | Usar transporte `streamable-http` del MCP Python SDK en path `/mcp` | Alta |
+| FR-013 | Generar `N8N_AGENT_GUIDE.md` como system prompt para el agente de IA | Alta |
+| FR-014 | El agente debe responder siempre en español en lenguaje natural | Alta |
 
 ---
 
 ## 4. Requerimientos No Funcionales
 
-| ID | Requerimiento |
-|---|---|
-| NFR-001 | El servidor debe ejecutarse con **Node.js v18 o superior** para usar `fetch` nativo sin dependencias HTTP externas. |
-| NFR-002 | Las credenciales (`API_KEY`, `API_SECRET`, `USER_EMAIL`) deben cargarse exclusivamente desde **variables de entorno**. El código fuente no debe contener credenciales en ninguna circunstancia. |
-| NFR-003 | El transporte del servidor MCP debe ser **stdio**, compatible con el protocolo estándar de OpenCode. |
-| NFR-004 | El `User-Agent` de todas las peticiones HTTP debe ser `neubox-mcp/1.0`. |
-| NFR-005 | El tiempo de espera máximo por petición HTTP a la API de NEUBOX no debe superar **15 segundos**. |
-| NFR-006 | La única dependencia externa permitida es `@modelcontextprotocol/sdk`. No se usarán librerías HTTP externas. |
-| NFR-007 | El servidor debe manejar el cierre limpio del proceso ante señales `SIGINT` y `SIGTERM`. |
+| ID | Requerimiento | Métrica |
+|---|---|---|
+| NFR-001 | Python >= 3.11 | — |
+| NFR-002 | MCP Python SDK con transporte `streamable-http` | — |
+| NFR-003 | Imagen Docker `python:3.12-slim` | — |
+| NFR-004 | Puerto expuesto configurable, default 8000 | — |
+| NFR-005 | Credenciales NEUBOX desde variables de entorno únicamente | Sin credenciales en código |
+| NFR-006 | `MCP_API_KEY` desde variable de entorno | — |
+| NFR-007 | `IP_WHITELIST` desde env, formato CSV con soporte CIDR | ej: `192.168.0.0/24,10.0.0.5` |
+| NFR-008 | Rate limit: `RATE_LIMIT_REQUESTS` (default 60) y `RATE_LIMIT_WINDOW` (default 60s) | — |
+| NFR-009 | Timeout 15s por petición a NEUBOX | — |
+| NFR-010 | User-Agent: `neubox-mcp-py/1.0` | — |
+| NFR-011 | Logging estructurado a stdout, nivel configurable con `LOG_LEVEL` | — |
+| NFR-012 | Manejo graceful de SIGINT/SIGTERM | — |
+| NFR-013 | Apache como reverse proxy con SSL vía Certbot | TLS terminado en Apache |
+| NFR-014 | No TLS dentro del contenedor | — |
 
 ---
 
-## 5. Estructura del Proyecto
+## 5. Arquitectura
+
+```
+┌──────────────────────────────────────────────────┐
+│  Contenedor Docker (neubox-mcp-py)               │
+│  Puerto: 8000                                     │
+│                                                   │
+│  ┌──────────────────────────────────────────────┐ │
+│  │  Starlette App                               │ │
+│  │  ├── Middleware: IP Whitelist (CIDR)          │ │
+│  │  ├── Middleware: API Key (X-API-Key)        │ │
+│  │  ├── Middleware: Rate Limiting (fixed window) │ │
+│  │  ├── GET /health (sin auth)                  │ │
+│  │  └── Mount /mcp → MCP streamable-http        │ │
+│  │       ├── Tool: list_domains                 │ │
+│  │       ├── Tool: register_domain              │ │
+│  │       ├── Tool: renew_domain                 │ │
+│  │       └── Tool: search_domains               │ │
+│  └──────────────────────────────────────────────┘ │
+│                       │                           │
+│                       ▼ HTTPS (timeout 15s)       │
+│              ┌─────────────────┐                   │
+│              │ api.neubox.com  │                   │
+│              └─────────────────┘                   │
+└──────────────────────────────────────────────────┘
+        ▲                          ▲
+        │ HTTP + X-API-Key          │ HTTP + X-API-Key
+        │                          │
+  ┌─────┴─────┐            ┌──────┴──────┐
+  │ N8N        │            │ Otros       │
+  │ Agente IA  │            │ servidores  │
+  └────────────┘            └─────────────┘
+        ▲
+        │ HTTPS (SSL via Certbot)
+        │
+  ┌─────┴─────┐
+  │ Apache     │
+  │ Reverse    │
+  │ Proxy      │
+  └────────────┘
+```
+
+---
+
+## 6. Estructura del Proyecto
 
 ```
 neubox-mcp/
-├── index.js          # Punto de entrada principal del servidor MCP
-├── package.json      # Definición del paquete y dependencias
-├── SPEC.md           # Este documento de especificación técnica
-└── README.md         # Instrucciones de instalación, configuración y uso
+├── main.py                 # Entrada: Starlette app + middlewares + MCP mount
+├── neubox_client.py        # Cliente HTTP async para API NEUBOX
+├── middleware.py           # API Key, IP Whitelist, Rate Limiting
+├── tools.py                # 4 tools MCP + schemas Pydantic
+├── config.py               # Carga de variables de entorno
+├── requirements.txt        # Dependencias Python
+├── Dockerfile              # Imagen Docker
+├── .env.example            # Template de variables de entorno
+├── SPEC.md                 # Este documento
+├── N8N_AGENT_GUIDE.md      # System prompt para agente N8N
+├── README.md               # Documentación de usuario
+└── AGENTS.md               # Instrucciones para agentes de código
 ```
 
 ---
 
-## 6. Contratos de las Tools MCP
+## 7. Contratos de las Tools MCP
 
-### 6.1 `list_domains`
+### 7.1 `list_domains`
 
-**Descripción:** Retorna el listado completo de dominios registrados en la cuenta NEUBOX.
+**Endpoint:** `POST https://api.neubox.com/getdomains`
+**Parámetros:** Ninguno.
 
-**Endpoint API:** `POST https://api.neubox.com/getdomains`
-
-**inputSchema:**
-```json
-{
-  "type": "object",
-  "properties": {},
-  "required": []
-}
-```
-> No requiere parámetros del usuario. Las credenciales se toman de las variables de entorno.
-
-**Headers de la petición:**
+**Headers:**
 ```
 Accept: application/json
 Content-Type: application/json
 neubox-api-key: <NEUBOX_API_KEY>
 neubox-api-secret: <NEUBOX_API_SECRET>
 neubox-user-email: <base64(NEUBOX_USER_EMAIL)>
-User-Agent: neubox-mcp/1.0
+User-Agent: neubox-mcp-py/1.0
 ```
 
-**Body de la petición:**
-```json
-{
-  "email": "<base64(NEUBOX_USER_EMAIL)>"
-}
-```
+**Body:** `{"email": "<base64(NEUBOX_USER_EMAIL)>"}`
 
 **Respuesta exitosa:**
 ```json
 {
   "result": "success",
   "response": [
-    {
-      "domain": "midominio.com",
-      "registrationdate": "2019-04-21",
-      "recurringamount": 591.25,
-      "expirydate": "2026-04-21",
-      "status": "Active"
-    }
+    {"domain": "midominio.com", "registrationdate": "2019-04-21", "recurringamount": 591.25, "expirydate": "2026-04-21", "status": "Active"}
   ]
 }
 ```
 
-**Respuesta de error:**
-```json
-{
-  "result": "success",
-  "error": "Bad Request",
-  "response": "User doesnt exists"
-}
-```
-
 ---
 
-### 6.2 `register_domain`
+### 7.2 `register_domain`
 
-**Descripción:** Registra uno o varios dominios nuevos usando el saldo disponible en la cuenta NEUBOX.
+**Endpoint:** `POST https://api.neubox.com/registerdomain`
 
-**Endpoint API:** `POST https://api.neubox.com/registerdomain`
+**Parámetros:**
+- `domains` (list[str]): Dominios a registrar. Ej: `["example.com"]`
+- `regperiod` (list[int]): Períodos en años. Ej: `[1]`
 
-**inputSchema:**
-```json
-{
-  "type": "object",
-  "properties": {
-    "domains": {
-      "type": "array",
-      "items": { "type": "string" },
-      "description": "Lista de nombres de dominio a registrar. Ejemplo: [\"example.com\", \"example.mx\"]"
-    },
-    "regperiod": {
-      "type": "array",
-      "items": { "type": "number" },
-      "description": "Períodos de registro en años para cada dominio, en el mismo orden que el array domains. Ejemplo: [1, 2]"
-    }
-  },
-  "required": ["domains", "regperiod"]
-}
-```
+**Validaciones:** BR-001, BR-002
 
-**Validaciones:**
-- `domains` y `regperiod` deben tener la misma longitud.
-- Cada elemento de `regperiod` debe ser un entero positivo mayor a 0.
-
-**Body de la petición:**
-```json
-{
-  "domains": ["example.com", "example.mx"],
-  "regperiod": [1, 2]
-}
-```
+**Body:** `{"domains": [...], "regperiod": [...]}`
 
 **Respuesta exitosa:**
 ```json
-{
-  "result": "success",
-  "response": {
-    "result": "success",
-    "invoiceid": 22333,
-    "amount": 591.25,
-    "invoicepaid": "true",
-    "credit": "826.48",
-    "example.com": "registered",
-    "example.mx": "registered"
-  }
-}
+{"result": "success", "response": {"result": "success", "invoiceid": 22333, "amount": 591.25, "invoicepaid": "true", "credit": "826.48", "example.com": "registered"}}
 ```
 
-**Respuesta de error (crédito insuficiente):**
+**Respuesta error (crédito insuficiente):**
 ```json
-{
-  "result": "success",
-  "response": {
-    "result": "error",
-    "message": "Crédito insuficiente...",
-    "credit": "$150.96",
-    "invoiceid": 102013,
-    "invoicepaid": "unpaid"
-  }
-}
+{"result": "success", "response": {"result": "error", "message": "Crédito insuficiente...", "credit": "$150.96", "invoiceid": 102013, "invoicepaid": "unpaid"}}
 ```
 
 ---
 
-### 6.3 `renew_domain`
+### 7.3 `renew_domain`
 
-**Descripción:** Renueva uno o varios dominios existentes en la cuenta NEUBOX.
+**Endpoint:** `POST https://api.neubox.com/renewdomain`
 
-**Endpoint API:** `POST https://api.neubox.com/renewdomain`
+**Parámetros:**
+- `domains` (list[str]): Dominios a renovar. Ej: `["example.com"]`
+- `renewperiod` (list[int]): Períodos en años. Ej: `[1]`
 
-**inputSchema:**
-```json
-{
-  "type": "object",
-  "properties": {
-    "domains": {
-      "type": "array",
-      "items": { "type": "string" },
-      "description": "Lista de nombres de dominio a renovar. Ejemplo: [\"example.com\", \"example.mx\"]"
-    },
-    "renewperiod": {
-      "type": "array",
-      "items": { "type": "number" },
-      "description": "Períodos de renovación en años para cada dominio, en el mismo orden que el array domains. Ejemplo: [1, 2]"
-    }
-  },
-  "required": ["domains", "renewperiod"]
-}
-```
+**Validaciones:** BR-003, BR-004
 
-**Validaciones:**
-- `domains` y `renewperiod` deben tener la misma longitud.
-- Cada elemento de `renewperiod` debe ser un entero positivo mayor a 0.
+**Body:** `{"domains": [...], "renewperiod": [...]}`
 
-**Body de la petición:**
-```json
-{
-  "domains": ["example.com", "example.mx"],
-  "renewperiod": [1, 2]
-}
-```
+---
+
+### 7.4 `search_domains`
+
+**Endpoint:** `POST https://api.neubox.com/searchdomains`
+
+**Parámetros:**
+- `domain` (str): Nombre de dominio. Ej: `"midominio"`
+- `tlds` (list[str]): TLDs a consultar. Ej: `["com", "mx", "net"]`
+
+**Validaciones:** BR-005, BR-006
+
+**Body:** `{"domain": "...", "tlds": [...]}`
 
 **Respuesta exitosa:**
 ```json
-{
-  "result": "success",
-  "response": {
-    "result": "success",
-    "invoiceid": 100231,
-    "amount": 462.88,
-    "invoicepaid": "true",
-    "credit": "882.00",
-    "example.com": "registered",
-    "example.mx": "registered"
-  }
-}
+{"result": "success", "response": {"search": "midominio.com", "sld": "midominio", "tld": "com", "available": ["net", "com"], "unavailable": ["mx"]}}
+```
+
+**Respuesta error (rate limit):**
+```json
+{"result": "error", "error": "Only 10 requests per minute are allowed"}
 ```
 
 ---
 
-### 6.4 `search_domains`
+## 8. Middlewares de Seguridad
 
-**Descripción:** Busca la disponibilidad de un nombre de dominio en uno o varios TLDs.
-
-**Endpoint API:** `POST https://api.neubox.com/searchdomains`
-
-**inputSchema:**
-```json
-{
-  "type": "object",
-  "properties": {
-    "domain": {
-      "type": "string",
-      "description": "Nombre de dominio a buscar, con o sin TLD. Ejemplo: \"midominio.com\" o \"midominio\""
-    },
-    "tlds": {
-      "type": "array",
-      "items": { "type": "string" },
-      "description": "Lista de TLDs a consultar. Ejemplo: [\"com\", \"mx\", \"net\"]"
-    }
-  },
-  "required": ["domain", "tlds"]
-}
-```
-
-**Validaciones:**
-- `tlds` debe ser un array con al menos 1 elemento.
-- `domain` no debe estar vacío.
-
-**Body de la petición:**
-```json
-{
-  "domain": "midominio.com",
-  "tlds": ["mx", "net"]
-}
-```
-
-**Respuesta exitosa:**
-```json
-{
-  "result": "success",
-  "response": {
-    "search": "midominio.com",
-    "sld": "midominio",
-    "tld": "com",
-    "available": ["net", "com"],
-    "unavailable": ["mx"]
-  }
-}
-```
-
-**Respuesta de error (rate limit):**
-```json
-{
-  "result": "error",
-  "error": "Only 10 requests per minute are allowed"
-}
-```
-
----
-
-## 7. Flujos Principales
-
-### Flujo general de una tool
+### 8.1 Orden de ejecución
 
 ```
-Usuario (LLM) -> Tool call con parámetros
-      |
-      v
-Servidor MCP (index.js)
-      |
-      +--> Validar parámetros de entrada
-      |         |
-      |         +--> Error de validación -> Retornar mensaje de error al LLM
-      |
-      +--> Leer variables de entorno (API_KEY, API_SECRET, USER_EMAIL)
-      |         |
-      |         +--> Variable faltante -> Retornar error de configuración al LLM
-      |
-      +--> Codificar email en Base64
-      |
-      +--> Construir headers y body HTTP
-      |
-      +--> POST a https://api.neubox.com/<endpoint>  (timeout: 15s)
-      |         |
-      |         +--> Error de red / timeout -> Retornar mensaje de error al LLM
-      |
-      +--> Parsear respuesta JSON
-      |
-      +--> Retornar resultado formateado al LLM
+Request → IP Whitelist → API Key → Rate Limit → /health or /mcp
 ```
 
----
+### 8.2 IP Whitelist
 
-## 8. Variables de Entorno
-
-| Variable | Tipo | Descripción | Requerida |
-|---|---|---|---|
-| `NEUBOX_API_KEY` | string | API Key de la cuenta NEUBOX | Si |
-| `NEUBOX_API_SECRET` | string | API Secret de la cuenta NEUBOX | Si |
-| `NEUBOX_USER_EMAIL` | string | Email de la cuenta NEUBOX en texto plano (el MCP lo codifica en Base64) | Si |
-
----
-
-## 9. Configuración en OpenCode
-
-El servidor se registra en OpenCode agregando lo siguiente al archivo `opencode.json`:
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "neubox": {
-      "type": "local",
-      "command": ["node", "/ruta/absoluta/neubox-mcp/index.js"],
-      "enabled": true,
-      "env": {
-        "NEUBOX_API_KEY": "tu_api_key",
-        "NEUBOX_API_SECRET": "tu_api_secret",
-        "NEUBOX_USER_EMAIL": "tu@email.com"
-      }
-    }
-  }
-}
-```
-
----
-
-## 10. Manejo de Errores
-
-| Escenario | Comportamiento esperado |
+| Aspecto | Detalle |
 |---|---|
-| Variable de entorno faltante al arrancar | El servidor lanza un error descriptivo en consola y termina el proceso con código 1 |
-| Parámetros inválidos o faltantes en una tool | Retorna al LLM un mensaje de texto con el campo faltante o el error de tipo, sin interrumpir el servidor |
-| Error de red o timeout en la petición HTTP | Retorna al LLM un mensaje indicando fallo de conexión con la API de NEUBOX |
-| La API responde con error de autenticación | Retorna al LLM el mensaje de error de la API tal como fue recibido |
-| Rate limit excedido (10 requests per minute) | Retorna al LLM el mensaje de rate limit de la API |
-| Crédito insuficiente en compra o renovación | Retorna al LLM el mensaje completo con el estado de la factura generada y el crédito disponible |
-| Respuesta no parseable como JSON | Retorna al LLM un mensaje indicando respuesta inesperada de la API |
+| Variable | `IP_WHITELIST` — CSV con soporte CIDR |
+| Formato | `192.168.0.0/24,10.0.0.5,203.0.113.50` |
+| Excepción | `/health` no se valida |
+| Rechazo | HTTP 403 `{"error": "IP no autorizada"}` |
+| IP vacía | Si `IP_WHITELIST` está vacía, se permite todo (modo desarrollo) |
+
+### 8.3 API Key Auth
+
+| Aspecto | Detalle |
+|---|---|
+| Variable | `MCP_API_KEY` |
+| Header | `X-API-Key: <valor>` |
+| Excepción | `/health` no se valida |
+| Rechazo | HTTP 401 `{"error": "API Key inválida o ausente"}` |
+
+### 8.4 Rate Limiting
+
+| Aspecto | Detalle |
+|---|---|
+| Variables | `RATE_LIMIT_REQUESTS` (default 60), `RATE_LIMIT_WINDOW` (default 60s) |
+| Algoritmo | Fixed window en memoria (dict por IP) |
+| Sin distinción | Contenedores locales y externos tienen el mismo límite |
+| Excepción | `/health` sí está sujeto a rate limiting |
+| Rechazo | HTTP 429 `{"error": "Rate limit excedido"}` + header `Retry-After` |
 
 ---
 
-## 11. Dependencias
+## 9. Variables de Entorno
 
-```json
-{
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "latest"
-  },
-  "engines": {
-    "node": ">=18.0.0"
-  }
-}
+| Variable | Requerida | Default | Descripción |
+|---|---|---|---|
+| `NEUBOX_API_KEY` | ✅ | — | API Key de NEUBOX |
+| `NEUBOX_API_SECRET` | ✅ | — | API Secret de NEUBOX |
+| `NEUBOX_USER_EMAIL` | ✅ | — | Email NEUBOX (texto plano, se codifica a Base64) |
+| `MCP_API_KEY` | ✅ | — | API Key de acceso al MCP |
+| `IP_WHITELIST` | ❌ | (vacío = permitir todo) | Lista blanca de IPs (CSV, soporta CIDR) |
+| `RATE_LIMIT_REQUESTS` | ❌ | 60 | Peticiones máximas por ventana |
+| `RATE_LIMIT_WINDOW` | ❌ | 60 | Tamaño de ventana en segundos |
+| `MCP_PORT` | ❌ | 8000 | Puerto del servidor MCP |
+| `LOG_LEVEL` | ❌ | INFO | Nivel de logging |
+
+---
+
+## 10. Reglas de Negocio
+
+| ID | Regla |
+|---|---|
+| BR-001 | `register_domain`: `domains` y `regperiod` misma longitud |
+| BR-002 | `register_domain`: cada `regperiod` entero > 0 |
+| BR-003 | `renew_domain`: `domains` y `renewperiod` misma longitud |
+| BR-004 | `renew_domain`: cada `renewperiod` entero > 0 |
+| BR-005 | `search_domains`: `tlds` mínimo 1 elemento |
+| BR-006 | `search_domains`: `domain` no vacío |
+| BR-007 | `register_domain` y `renew_domain` incluyen warning en su descripción |
+| BR-008 | El agente debe pedir confirmación al usuario antes de register/renew |
+
+---
+
+## 11. Manejo de Errores
+
+| Escenario | Comportamiento |
+|---|---|
+| Variable de entorno faltante | El proceso termina con código 1 y mensaje en español |
+| Parámetros inválidos | Retorna al agente mensaje de error de validación, sin interrumpir el servidor |
+| Error de red o timeout | Retorna al agente mensaje indicando fallo de conexión |
+| Error de autenticación NEUBOX | Retorna el mensaje de error de la API tal como fue recibido |
+| Rate limit NEUBOX excedido | Retorna el mensaje de rate limit de la API |
+| Crédito insuficiente | Retorna estado de factura y crédito disponible |
+| Respuesta no JSON | Retorna mensaje indicando respuesta inesperada |
+| API Key inválida/ausente | HTTP 401 JSON |
+| IP no autorizada | HTTP 403 JSON |
+| Rate limit del MCP excedido | HTTP 429 JSON + Retry-After |
+
+---
+
+## 12. Dependencias
+
+```
+mcp>=1.0.0
+httpx>=0.27.0
+pydantic>=2.0.0
+starlette>=0.37.0
+uvicorn>=0.30.0
 ```
 
 ---
 
-## 12. Criterios de Aceptación
+## 13. Criterios de Aceptación
 
 | ID | Criterio |
 |---|---|
-| CA-001 | El servidor arranca sin errores cuando las 3 variables de entorno están definidas. |
-| CA-002 | El servidor termina con un mensaje claro si alguna variable de entorno está ausente. |
-| CA-003 | La tool `list_domains` retorna el listado de dominios de la cuenta cuando las credenciales son válidas. |
-| CA-004 | La tool `register_domain` registra dominios correctamente y retorna el `invoiceid` y el crédito restante. |
-| CA-005 | La tool `renew_domain` renueva dominios correctamente y retorna el `invoiceid` y el crédito restante. |
-| CA-006 | La tool `search_domains` retorna correctamente los TLDs disponibles y no disponibles para un dominio dado. |
-| CA-007 | Todas las peticiones incluyen el email codificado en Base64 en el header `neubox-user-email` y en el body cuando aplica. |
-| CA-008 | Los errores de la API se retornan como texto legible al LLM sin romper el proceso del servidor. |
-| CA-009 | El snippet de configuración de `opencode.json` permite que OpenCode descubra y use el MCP correctamente. |
-| CA-010 | El `User-Agent` de todas las peticiones es `neubox-mcp/1.0`. |
+| AC-001 | `list_domains` retorna dominios cuando las credenciales son válidas |
+| AC-002 | `register_domain` registra dominios y retorna invoiceid + credit |
+| AC-003 | `renew_domain` renueva dominios y retorna invoiceid + credit |
+| AC-004 | `search_domains` retorna TLDs disponibles y no disponibles |
+| AC-005 | Parámetros inválidos → mensaje de error descriptivo |
+| AC-006 | Petición sin X-API-Key → HTTP 401 |
+| AC-007 | IP no autorizada → HTTP 403 |
+| AC-008 | Exceder rate limit → HTTP 429 + Retry-After |
+| AC-009 | `GET /health` → 200 sin auth |
+| AC-010 | N8N_AGENT_GUIDE.md existe y describe las 4 tools |
+| AC-011 | Timeout 15s → error legible |
+| AC-012 | SIGTERM → cierre graceful |
+| AC-013 | Email codificado en Base64 en headers y body |
+| AC-014 | User-Agent: `neubox-mcp-py/1.0` |
 
 ---
 
-## 13. Supuestos y Restricciones
+## 14. Supuestos y Restricciones
 
-- La API de NEUBOX no requiere autenticación OAuth ni tokens temporales; usa API Key + Secret estáticos.
-- La API impone un límite de **10 peticiones por minuto** en el endpoint `searchdomains`. El MCP no implementa reintentos automáticos en esta versión.
-- El MCP no implementa caché de respuestas; cada invocación de una tool genera una nueva petición HTTP.
-- El MCP opera con una sola cuenta NEUBOX por instancia (definida por las variables de entorno).
+- La API de NEUBOX usa API Key + Secret estáticos (sin OAuth).
+- Rate limit del endpoint `searchdomains`: 10 peticiones/minuto (impuesto por NEUBOX).
+- No hay caché de respuestas; cada invocación genera una nueva petición HTTP.
+- Una instancia del MCP opera con una sola cuenta NEUBOX.
 - No se implementan tests automatizados en esta versión inicial.
+- TLS se termina en Apache; el contenedor no maneja HTTPS.
+- El algoritmo de rate limiting es fixed window en memoria (sin Redis).

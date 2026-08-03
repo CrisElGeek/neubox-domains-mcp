@@ -2,66 +2,74 @@
 
 ## Qué es este repo
 
-Servidor MCP (Model Context Protocol) de un solo archivo para OpenCode. Conecta con la API de administración de dominios de NEUBOX (`https://api.neubox.com`) y expone 4 tools: `list_domains`, `register_domain`, `renew_domain`, `search_domains`.
+Servidor MCP (Model Context Protocol) en **Python** que conecta con la API de administración de dominios de NEUBOX (`https://api.neubox.com`). Diseñado para ser consumido por un Agente de IA en N8N mediante transporte HTTP `streamable-http`. Expone 4 tools: `list_domains`, `register_domain`, `renew_domain`, `search_domains`.
 
 ## Estructura
 
-- `index.js` — punto de entrada único del servidor MCP (ESM, no TypeScript).
-- `package.json` — única dependencia declarada: `@modelcontextprotocol/sdk` (versión `latest`).
-- `README.md` — documentación de usuario.
-- `SPEC.md` — contratos de API, flujos y criterios de aceptación.
+- `main.py` — punto de entrada: Starlette app + middlewares + MCP mount + uvicorn
+- `neubox_client.py` — cliente HTTP async (httpx) para la API de NEUBOX
+- `middleware.py` — 3 middlewares: IP Whitelist (CIDR), API Key, Rate Limiting (fixed window)
+- `tools.py` — definición de las 4 tools MCP con schemas Pydantic
+- `config.py` — carga y validación de variables de entorno
+- `requirements.txt` — dependencias Python
+- `Dockerfile` — imagen Docker `python:3.12-slim`
+- `.env.example` — template de variables de entorno
+- `SPEC.md` — especificación técnica completa
+- `N8N_AGENT_GUIDE.md` — system prompt para el agente de IA de N8N
+- `README.md` — documentación de usuario
 - **No hay tests, linter, formatter, typecheck, build ni CI.**
 
 ## Requisitos y arranque
 
-- Node.js >= 18.0.0 (necesario para `fetch` nativo).
-- Requiere 3 variables de entorno al arrancar:
-  - `NEUBOX_API_KEY`
-  - `NEUBOX_API_SECRET`
-  - `NEUBOX_USER_EMAIL` (texto plano; el servidor la codifica a Base64).
-- Si falta alguna variable, el proceso termina con código 1 y un mensaje en español.
+- Python >= 3.11
+- Requiere variables de entorno al arrancar (ver `.env.example`):
+  - `NEUBOX_API_KEY` (requerida)
+  - `NEUBOX_API_SECRET` (requerida)
+  - `NEUBOX_USER_EMAIL` (requerida, texto plano; el servidor la codifica a Base64)
+  - `MCP_API_KEY` (requerida, token de acceso al MCP)
+  - `IP_WHITELIST` (opcional, CSV con CIDR; vacío = permitir todas)
+  - `RATE_LIMIT_REQUESTS` (opcional, default 60)
+  - `RATE_LIMIT_WINDOW` (opcional, default 60 seg)
+  - `MCP_PORT` (opcional, default 8000)
+  - `LOG_LEVEL` (opcional, default INFO)
+- Si falta una variable requerida, el proceso termina con código 1 y un mensaje en español.
 
 ```bash
-npm install
-npm start          # alias de `node index.js`
+pip install -r requirements.txt
+python main.py
 ```
 
-## Configuración en OpenCode
+O con Docker:
 
-El servidor se registra como MCP local por stdio. Ejemplo en `opencode.json`:
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "neubox": {
-      "type": "local",
-      "command": ["node", "/ruta/absoluta/neubox-mcp/index.js"],
-      "enabled": true,
-      "env": {
-        "NEUBOX_API_KEY": "...",
-        "NEUBOX_API_SECRET": "...",
-        "NEUBOX_USER_EMAIL": "..."
-      }
-    }
-  }
-}
+```bash
+docker build -t neubox-mcp .
+docker run -d -p 8000:8000 --env-file .env neubox-mcp
 ```
+
+## Despliegue
+
+El contenedor expone el puerto 8000 por HTTP. Se recomienda usar Apache como reverse proxy con SSL vía Certbot. Ver `README.md` para la configuración completa de Apache.
 
 ## Gotchas importantes
 
-- **ESM implícito:** `package.json` tiene `"type": "module"`. No usar `require()`.
-- **Zod no está en `dependencies` explícitas:** `index.js` importa `zod`, pero está disponible como dependencia transitiva de `@modelcontextprotocol/sdk`. Si se actualizan o reinstalan paquetes, considera declarar `zod` en `dependencies` para evitar romper la importación.
-- **Operaciones con dinero real:** `register_domain` y `renew_domain` descuentan saldo de la cuenta NEUBOX. No ejecutar con dominios de prueba sin confirmar primero.
-- **Rate limit:** el endpoint `searchdomains` tiene límite de 10 peticiones/minuto. El servidor no implementa reintentos ni cola.
+- **Transporte HTTP, no stdio:** A diferencia de la versión anterior en Node.js, este MCP usa `streamable-http` del MCP Python SDK. El endpoint MCP está en `/mcp`.
+- **Async:** El cliente HTTP usa `httpx.AsyncClient`. Todas las tools son `async`.
+- **Middlewares encadenados:** Orden de ejecución: IP Whitelist → API Key → Rate Limit → handler. `/health` está exento de IP Whitelist y API Key pero no de Rate Limit.
+- **Operaciones con dinero real:** `register_domain` y `renew_domain` descuentan saldo de la cuenta NEUBOX. Las tools incluyen warnings en su descripción para que el agente pida confirmación.
+- **Rate limit NEUBOX:** el endpoint `searchdomains` tiene límite de 10 peticiones/minuto. El servidor no implementa reintentos.
 - **Timeout fijo:** 15 segundos por petición a la API de NEUBOX.
-- **User-Agent fijo:** todas las peticiones envían `User-Agent: neubox-mcp/1.0`.
-- **Codificación de email:** el servidor codifica `NEUBOX_USER_EMAIL` en Base64 para los headers y el body cuando aplica.
-- **Errores de red:** se devuelven como texto al LLM, no lanzan excepciones fuera del handler; esto evita que el proceso MCP se rompa.
+- **User-Agent fijo:** `neubox-mcp-py/1.0`.
+- **Codificación de email:** el servidor codifica `NEUBOX_USER_EMAIL` en Base64 para headers y body.
+- **Rate limiting en memoria:** usa un dict en memoria (fixed window). Se reinicia al reiniciar el contenedor. No hay Redis.
+- **IP Whitelist con CIDR:** soporta notación CIDR (ej: `192.168.0.0/24`). Usa la librería `ipaddress` de Python.
+- **Errores de red:** se devuelven como texto al LLM, no lanzan excepciones fuera del handler.
 
 ## Cómo hacer cambios
 
-- Editar únicamente `index.js` para lógica del servidor o tools.
-- Si se agrega una tool nueva, mantener el mismo patrón: validación de inputs con Zod, llamada a `neuboxPost`, y respuesta con `formatResult`.
-- Actualizar `README.md` y `SPEC.md` si cambian los contratos de las tools o la configuración de OpenCode.
-- No hay verificación automatizada: antes de considerar listo un cambio, arrancar el servidor con `npm start` y comprobar que no falle la validación de variables de entorno.
+- **Lógica del servidor o middlewares:** editar `main.py` o `middleware.py`
+- **Lógica de tools o validaciones:** editar `tools.py`
+- **Cliente HTTP a NEUBOX:** editar `neubox_client.py`
+- **Variables de entorno:** editar `config.py`
+- Si se agrega una tool nueva, mantener el patrón: schema Pydantic, validación, llamada a `NeuboxClient`, `_format_result`.
+- Actualizar `SPEC.md`, `N8N_AGENT_GUIDE.md` y `README.md` si cambian los contratos o la config.
+- No hay verificación automatizada: antes de considerar listo un cambio, arrancar el servidor con `python main.py` y comprobar que no falle la validación de variables de entorno.
