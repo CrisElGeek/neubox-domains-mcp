@@ -1,0 +1,50 @@
+# ─── Docker ignore ──────────────────────────────────────────────
+.git
+.gitignore
+.github
+.gitlab-ci.yml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Docs
+*.md
+!N8N_AGENT_GUIDE.md
+
+# Exports
+*.tar
+*.tar.gz
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+Makefile
+DEV_ENV_MANUAL.md
+README-docker.md
